@@ -89,10 +89,10 @@ export function SocraticSidebar({
 
   if (collapsed) {
     return (
-      <div className={cn("flex flex-col items-center", className)}>
+      <div className={cn("flex flex-col items-center py-3 px-1", className)}>
         <button
           onClick={() => setCollapsed(false)}
-          className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+          className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-card/95 backdrop-blur-sm text-muted-foreground shadow-md transition-colors hover:bg-secondary hover:text-foreground"
           aria-label="Open Socratic Sidebar"
           type="button"
         >
@@ -110,10 +110,10 @@ export function SocraticSidebar({
   return (
     <div
       className={cn(
-        "flex w-80 flex-col rounded-xl border border-border bg-card shadow-lg",
+        "flex w-80 flex-col border-l border-border bg-card/95 backdrop-blur-sm shadow-lg",
         className
       )}
-      style={{ height: "calc(100vh - 200px)", maxHeight: "640px", minHeight: "400px" }}
+      style={{ height: "100%" }}
     >
       {/* Header */}
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
@@ -230,7 +230,7 @@ export function SocraticSidebar({
                       <div className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-purple-100">
                         <span className="text-[8px] font-bold text-purple-500">+</span>
                       </div>
-                      <span className="text-xs text-foreground truncate">{node.label}</span>
+                      <span className="text-xs text-foreground flex-1 break-words">{node.label}</span>
                       {node.risk && (
                         <span className={cn(
                           "ml-auto shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-medium",

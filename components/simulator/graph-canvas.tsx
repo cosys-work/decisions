@@ -15,6 +15,9 @@ interface GraphCanvasProps {
   winningOptionId?: string | null
   onAcceptGhost?: (nodeId: string) => void
   onRejectGhost?: (nodeId: string) => void
+  onEditNode?: (nodeId: string, newLabel: string) => void
+  onAddChildNode?: (parentNodeId: string) => void
+  onDeleteNode?: (nodeId: string) => void
   className?: string
 }
 
@@ -127,7 +130,13 @@ function wrapText(text: string, maxChars: number): string[] {
     }
   }
   if (current) lines.push(current.trim())
-  return lines.slice(0, 3)
+  // Allow up to 5 lines; truncate last line with ellipsis if needed
+  if (lines.length > 5) {
+    const truncated = lines.slice(0, 5)
+    truncated[4] = truncated[4].slice(0, maxChars - 3) + "..."
+    return truncated
+  }
+  return lines
 }
 
 export function GraphCanvas({
@@ -139,19 +148,25 @@ export function GraphCanvas({
   winningOptionId,
   onAcceptGhost,
   onRejectGhost,
+  onEditNode,
+  onAddChildNode,
+  onDeleteNode,
   className,
 }: GraphCanvasProps) {
   const svgRef = useRef<SVGSVGElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
   const [dragging, setDragging] = useState<{ nodeId: string; offsetX: number; offsetY: number } | null>(null)
   const [viewBox, setViewBox] = useState({ x: 0, y: 0, w: 900, h: 600 })
-  const [panning, setPanning] = useState<{ startX: number; startY: number; startVBX: number; startVBY: number } | null>(null)
+  const [panning, setPanning] = useState<{ startClientX: number; startClientY: number; startVBX: number; startVBY: number } | null>(null)
+  const [editingNodeId, setEditingNodeId] = useState<string | null>(null)
+  const [editText, setEditText] = useState("")
+  const [hasUserPanned, setHasUserPanned] = useState(false)
+  const prevNodeCountRef = useRef(graph.nodes.length)
 
-  useEffect(() => {
-    if (graph.nodes.length <= 1) {
-      setViewBox({ x: 0, y: 0, w: 900, h: 600 })
-      return
-    }
-    const padding = 180
+  // Compute bounding box that fits all nodes
+  const computeFitViewBox = useCallback(() => {
+    if (graph.nodes.length <= 1) return { x: 0, y: 0, w: 900, h: 600 }
+    const padding = 160
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
     for (const node of graph.nodes) {
       minX = Math.min(minX, node.x)
@@ -161,13 +176,23 @@ export function GraphCanvas({
     }
     const w = Math.max(maxX - minX + padding * 2, 600)
     const h = Math.max(maxY - minY + padding * 2, 400)
-    setViewBox({
-      x: minX - padding,
-      y: minY - padding,
-      w,
-      h,
-    })
+    return { x: minX - padding, y: minY - padding, w, h }
   }, [graph.nodes])
+
+  // Auto-fit only on initial load (before user has interacted with pan/zoom)
+  useEffect(() => {
+    const nodeCount = graph.nodes.length
+    if (!hasUserPanned) {
+      setViewBox(computeFitViewBox())
+    }
+    prevNodeCountRef.current = nodeCount
+  }, [graph.nodes.length, computeFitViewBox, hasUserPanned])
+
+  // Fit all nodes into view (callable by button)
+  const fitToView = useCallback(() => {
+    setViewBox(computeFitViewBox())
+    setHasUserPanned(false)
+  }, [computeFitViewBox])
 
   const getSVGPoint = useCallback(
     (e: React.MouseEvent | MouseEvent) => {
@@ -183,11 +208,42 @@ export function GraphCanvas({
     [viewBox]
   )
 
+  // Convert SVG coords to screen position for overlay
+  const getScreenPosition = useCallback((svgX: number, svgY: number) => {
+    if (!svgRef.current || !containerRef.current) return { x: 0, y: 0 }
+    const rect = svgRef.current.getBoundingClientRect()
+    const containerRect = containerRef.current.getBoundingClientRect()
+    const scaleX = rect.width / viewBox.w
+    const scaleY = rect.height / viewBox.h
+    return {
+      x: (svgX - viewBox.x) * scaleX + rect.left - containerRect.left,
+      y: (svgY - viewBox.y) * scaleY + rect.top - containerRect.top,
+    }
+  }, [viewBox])
+
+  // Start inline editing
+  function startEditing(nodeId: string) {
+    const node = graph.nodes.find((n) => n.id === nodeId)
+    if (!node || node.isGhost) return
+    setEditingNodeId(nodeId)
+    setEditText(node.label)
+  }
+
+  // Finish inline editing
+  function finishEditing() {
+    if (editingNodeId && editText.trim() && onEditNode) {
+      onEditNode(editingNodeId, editText.trim())
+    }
+    setEditingNodeId(null)
+    setEditText("")
+  }
+
   const handleMouseDown = useCallback(
     (e: React.MouseEvent, nodeId: string) => {
       e.stopPropagation()
+      if (editingNodeId) return
       const node = graph.nodes.find((n) => n.id === nodeId)
-      if (node?.isGhost) return // ghost nodes can't be dragged
+      if (node?.isGhost) return
       if (!onNodeDrag) {
         onSelectNode(nodeId)
         return
@@ -197,17 +253,60 @@ export function GraphCanvas({
       setDragging({ nodeId, offsetX: pt.x - node.x, offsetY: pt.y - node.y })
       onSelectNode(nodeId)
     },
-    [graph.nodes, getSVGPoint, onNodeDrag, onSelectNode]
+    [graph.nodes, getSVGPoint, onNodeDrag, onSelectNode, editingNodeId]
   )
 
+  // Double-click to edit
+  const handleDoubleClick = useCallback(
+    (e: React.MouseEvent, nodeId: string) => {
+      e.stopPropagation()
+      e.preventDefault()
+      if (!onEditNode) return
+      startEditing(nodeId)
+    },
+    [onEditNode, graph.nodes]
+  )
+
+  // Pan: store raw client coords for stable delta calculation
   const handleBgMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      if (dragging) return
+      if (dragging || editingNodeId) return
       onSelectNode(null)
-      const pt = getSVGPoint(e)
-      setPanning({ startX: pt.x, startY: pt.y, startVBX: viewBox.x, startVBY: viewBox.y })
+      setPanning({
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        startVBX: viewBox.x,
+        startVBY: viewBox.y,
+      })
     },
-    [dragging, getSVGPoint, onSelectNode, viewBox]
+    [dragging, editingNodeId, onSelectNode, viewBox]
+  )
+
+  // Scroll wheel zoom
+  const handleWheel = useCallback(
+    (e: React.WheelEvent) => {
+      e.preventDefault()
+      const zoomFactor = e.deltaY > 0 ? 1.08 : 0.92
+      if (!svgRef.current) return
+      const rect = svgRef.current.getBoundingClientRect()
+      // Zoom toward cursor position
+      const mouseXRatio = (e.clientX - rect.left) / rect.width
+      const mouseYRatio = (e.clientY - rect.top) / rect.height
+      setViewBox((v) => {
+        const newW = Math.max(200, Math.min(4000, v.w * zoomFactor))
+        const newH = Math.max(150, Math.min(3000, v.h * zoomFactor))
+        const dw = newW - v.w
+        const dh = newH - v.h
+        return {
+          x: v.x - dw * mouseXRatio,
+          y: v.y - dh * mouseYRatio,
+          w: newW,
+          h: newH,
+        }
+      })
+      setHasUserPanned(true)
+    },
+    []
   )
 
   useEffect(() => {
@@ -220,13 +319,15 @@ export function GraphCanvas({
         const rect = svgRef.current.getBoundingClientRect()
         const scaleX = viewBox.w / rect.width
         const scaleY = viewBox.h / rect.height
-        const dx = (e.clientX - rect.left) * scaleX + panning.startVBX - panning.startX
-        const dy = (e.clientY - rect.top) * scaleY + panning.startVBY - panning.startY
+        // Delta in client pixels → convert to SVG units → subtract from start viewBox
+        const dxClient = e.clientX - panning.startClientX
+        const dyClient = e.clientY - panning.startClientY
         setViewBox((v) => ({
           ...v,
-          x: panning.startVBX - (dx - panning.startVBX),
-          y: panning.startVBY - (dy - panning.startVBY),
+          x: panning.startVBX - dxClient * scaleX,
+          y: panning.startVBY - dyClient * scaleY,
         }))
+        setHasUserPanned(true)
       }
     }
 
@@ -257,13 +358,57 @@ export function GraphCanvas({
   }
 
   return (
-    <div className={cn("canvas-container relative overflow-hidden rounded-xl border border-border", className)}>
+    <div ref={containerRef} className={cn("canvas-container relative overflow-hidden bg-background", className)}>
+      {/* Fit-to-view / zoom controls */}
+      <div className="absolute top-3 left-3 z-10 flex gap-1.5">
+        <button
+          onClick={fitToView}
+          className="flex h-8 w-8 items-center justify-center rounded-lg border border-border bg-white/90 text-muted-foreground shadow-sm hover:bg-white hover:text-foreground transition-colors"
+          title="Fit all nodes in view"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+          </svg>
+        </button>
+        <button
+          onClick={() => {
+            setViewBox((v) => {
+              const f = 0.85
+              const newW = Math.max(200, v.w * f)
+              const newH = Math.max(150, v.h * f)
+              return { x: v.x + (v.w - newW) / 2, y: v.y + (v.h - newH) / 2, w: newW, h: newH }
+            })
+            setHasUserPanned(true)
+          }}
+          className="flex h-8 w-8 items-center justify-center rounded-lg border border-border bg-white/90 text-muted-foreground shadow-sm hover:bg-white hover:text-foreground transition-colors text-lg font-medium"
+          title="Zoom in"
+        >
+          +
+        </button>
+        <button
+          onClick={() => {
+            setViewBox((v) => {
+              const f = 1.18
+              const newW = Math.min(4000, v.w * f)
+              const newH = Math.min(3000, v.h * f)
+              return { x: v.x + (v.w - newW) / 2, y: v.y + (v.h - newH) / 2, w: newW, h: newH }
+            })
+            setHasUserPanned(true)
+          }}
+          className="flex h-8 w-8 items-center justify-center rounded-lg border border-border bg-white/90 text-muted-foreground shadow-sm hover:bg-white hover:text-foreground transition-colors text-lg font-medium"
+          title="Zoom out"
+        >
+          −
+        </button>
+      </div>
+
       <svg
         ref={svgRef}
         viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`}
         className="h-full w-full cursor-grab active:cursor-grabbing"
         style={{ minHeight: "500px" }}
         onMouseDown={handleBgMouseDown}
+        onWheel={handleWheel}
       >
         {/* Grid pattern */}
         <defs>
@@ -372,24 +517,30 @@ export function GraphCanvas({
 
           // Weighting: scale node size based on weight (1-5)
           const weightScale = node.weight ? 0.8 + (node.weight / 5) * 0.6 : 1
-          const baseRx = isCenter ? 72 : isCons ? 55 : 64
-          const baseRy = isCenter ? 44 : isCons ? 24 : 30
-          const rx = baseRx * weightScale
-          const ry = baseRy * weightScale
+          const baseRx = isCenter ? 76 : isCons ? 60 : 68
+          const baseRy = isCenter ? 44 : isCons ? 26 : 32
 
           const lines = wrapText(node.label, isCenter ? 18 : isCons ? 16 : 14)
           const fontSize = isCenter ? 13.5 : isCons ? 10.5 : 11.5
+
+          // Grow ellipse vertically to fit text lines
+          const lineHeight = fontSize + 2
+          const textHeight = lines.length * lineHeight
+          const minRy = textHeight / 2 + 8
+          const rx = baseRx * weightScale
+          const ry = Math.max(baseRy * weightScale, minRy)
 
           return (
             <g
               key={node.id}
               onMouseDown={(e) => handleMouseDown(e, node.id)}
+              onDoubleClick={(e) => handleDoubleClick(e, node.id)}
               className={cn(
                 "cursor-pointer graph-node",
                 isCenter && "node-pulse-glow",
                 isGhost && "ghost-node"
               )}
-              opacity={isFogged ? 0.25 : isGhost ? 0.7 : 1}
+              opacity={isFogged ? 0.25 : isGhost ? 0.92 : 1}
               filter={isFogged ? "url(#fog-blur)" : undefined}
               role="button"
               tabIndex={0}
@@ -437,28 +588,29 @@ export function GraphCanvas({
                   }
                 />
               )}
-              {/* Ghost node accept/reject buttons */}
+              {/* Ghost node accept/reject buttons — always visible at full opacity */}
               {isGhost && onAcceptGhost && onRejectGhost && (
-                <g>
+                <g opacity={1}>
                   {/* Accept button */}
                   <g
-                    onClick={(e) => { e.stopPropagation(); onAcceptGhost(node.id) }}
+                    onMouseDown={(e) => { e.stopPropagation(); e.preventDefault(); onAcceptGhost(node.id) }}
                     className="cursor-pointer"
                   >
                     <circle
-                      cx={node.x + rx + 12}
-                      cy={node.y - 8}
-                      r={10}
+                      cx={node.x + rx + 16}
+                      cy={node.y - 12}
+                      r={14}
                       fill={COLORS.green}
-                      opacity={0.9}
+                      stroke="white"
+                      strokeWidth={2}
                     />
                     <text
-                      x={node.x + rx + 12}
-                      y={node.y - 7}
+                      x={node.x + rx + 16}
+                      y={node.y - 11}
                       textAnchor="middle"
                       dominantBaseline="central"
                       fill="white"
-                      fontSize="11"
+                      fontSize="14"
                       fontWeight="bold"
                       className="pointer-events-none"
                     >
@@ -467,23 +619,24 @@ export function GraphCanvas({
                   </g>
                   {/* Reject button */}
                   <g
-                    onClick={(e) => { e.stopPropagation(); onRejectGhost(node.id) }}
+                    onMouseDown={(e) => { e.stopPropagation(); e.preventDefault(); onRejectGhost(node.id) }}
                     className="cursor-pointer"
                   >
                     <circle
-                      cx={node.x + rx + 12}
-                      cy={node.y + 12}
-                      r={10}
+                      cx={node.x + rx + 16}
+                      cy={node.y + 16}
+                      r={14}
                       fill={COLORS.red}
-                      opacity={0.9}
+                      stroke="white"
+                      strokeWidth={2}
                     />
                     <text
-                      x={node.x + rx + 12}
-                      y={node.y + 13}
+                      x={node.x + rx + 16}
+                      y={node.y + 17}
                       textAnchor="middle"
                       dominantBaseline="central"
                       fill="white"
-                      fontSize="11"
+                      fontSize="14"
                       fontWeight="bold"
                       className="pointer-events-none"
                     >
@@ -501,9 +654,127 @@ export function GraphCanvas({
                   fill={COLORS.purple}
                 />
               )}
+              {/* Action buttons for selected non-ghost nodes */}
+              {isSelected && !isGhost && editingNodeId !== node.id && (
+                <g>
+                  {/* Add child node button (+ on option/center nodes) */}
+                  {(node.type === "center" || node.type === "option") && onAddChildNode && (
+                    <g
+                      onClick={(e) => { e.stopPropagation(); onAddChildNode(node.id) }}
+                      className="cursor-pointer"
+                    >
+                      <circle
+                        cx={node.x}
+                        cy={node.y + ry + 18}
+                        r={12}
+                        fill={COLORS.accent}
+                        opacity={0.9}
+                      />
+                      <text
+                        x={node.x}
+                        y={node.y + ry + 19}
+                        textAnchor="middle"
+                        dominantBaseline="central"
+                        fill="white"
+                        fontSize="14"
+                        fontWeight="bold"
+                        className="pointer-events-none"
+                      >
+                        +
+                      </text>
+                    </g>
+                  )}
+                  {/* Delete node button (× on non-center nodes) */}
+                  {node.type !== "center" && onDeleteNode && (
+                    <g
+                      onClick={(e) => { e.stopPropagation(); onDeleteNode(node.id) }}
+                      className="cursor-pointer"
+                    >
+                      <circle
+                        cx={node.x + rx + 4}
+                        cy={node.y - ry - 4}
+                        r={10}
+                        fill={COLORS.red}
+                        opacity={0.85}
+                      />
+                      <text
+                        x={node.x + rx + 4}
+                        y={node.y - ry - 3}
+                        textAnchor="middle"
+                        dominantBaseline="central"
+                        fill="white"
+                        fontSize="11"
+                        fontWeight="bold"
+                        className="pointer-events-none"
+                      >
+                        ✕
+                      </text>
+                    </g>
+                  )}
+                  {/* Edit hint */}
+                  {onEditNode && (
+                    <text
+                      x={node.x}
+                      y={node.y + ry + (node.type === "center" || node.type === "option" ? 38 : 18)}
+                      textAnchor="middle"
+                      dominantBaseline="central"
+                      fill={COLORS.borderLight}
+                      fontSize="9"
+                      fontFamily="Inter, system-ui, sans-serif"
+                      className="pointer-events-none select-none"
+                    >
+                      double-click to edit
+                    </text>
+                  )}
+                </g>
+              )}
             </g>
           )
         })}
+        {/* Inline editing via foreignObject — lives in SVG space so it tracks the node exactly */}
+        {editingNodeId && (() => {
+          const editNode = graph.nodes.find((n) => n.id === editingNodeId)
+          if (!editNode) return null
+          const foWidth = 200
+          const foHeight = 80
+          return (
+            <foreignObject
+              x={editNode.x - foWidth / 2}
+              y={editNode.y - foHeight / 2}
+              width={foWidth}
+              height={foHeight}
+            >
+              <div style={{ width: foWidth, height: foHeight, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+                <textarea
+                  value={editText}
+                  onChange={(e) => setEditText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); finishEditing() }
+                    if (e.key === "Escape") { setEditingNodeId(null); setEditText("") }
+                  }}
+                  onBlur={finishEditing}
+                  autoFocus
+                  rows={3}
+                  style={{
+                    width: foWidth - 8,
+                    resize: "none",
+                    borderRadius: 10,
+                    border: "2px solid hsl(186 50% 42%)",
+                    background: "white",
+                    padding: "6px 8px",
+                    textAlign: "center",
+                    fontSize: 12,
+                    fontWeight: 500,
+                    fontFamily: "Inter, system-ui, sans-serif",
+                    outline: "none",
+                    boxShadow: "0 4px 20px rgba(0,0,0,0.15)",
+                  }}
+                />
+                <span style={{ marginTop: 2, fontSize: 8, color: "#999" }}>Enter to save · Esc to cancel</span>
+              </div>
+            </foreignObject>
+          )
+        })()}
       </svg>
     </div>
   )

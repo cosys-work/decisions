@@ -104,7 +104,7 @@ export function AppShell({ activeView, onViewChange, children }: AppShellProps) 
       </header>
 
       <main className="flex-1">
-        <div className="mx-auto max-w-[1440px] px-4 py-4 lg:px-6 lg:py-6">
+        <div className="px-4 py-4 lg:px-6 lg:py-6">
           {children}
         </div>
       </main>

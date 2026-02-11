@@ -14,9 +14,10 @@ import {
   createInitialGraph,
   layoutOptionsRadially,
   addConsequenceNodes,
+  forceDirectedLayout,
 } from "@/lib/graph-types"
 import { addDecision } from "@/lib/store"
-import { Plus, Compass, Check, Sparkles, Loader2, ArrowRight, Vote, Wand2 } from "lucide-react"
+import { Plus, Compass, Check, Sparkles, Loader2, ArrowRight, Vote, Wand2, LayoutGrid } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 type SimPhase = "start" | "brain-dump" | "map" | "commit-ready" | "complete"
@@ -88,6 +89,7 @@ export function DecisionSimulator() {
             opt.consequences.map((c) => ({ id: c.id, text: c.text, risk: c.risk }))
           )
         }
+        g = forceDirectedLayout(g)
         setGraph(g)
 
         // Add AI's initial insight as a chat message
@@ -197,11 +199,15 @@ export function DecisionSimulator() {
     return null
   }
 
-  // --- Add ghost nodes to canvas (AI suggestions) ---
+  // --- Add ghost nodes to canvas (AI suggestions, with dedup) ---
   function addGhostNodesToCanvas(suggestedNodes: { label: string; type: string; parentLabel?: string; risk?: string }[]) {
     setGraph((g) => {
       let newGraph = { ...g, nodes: [...g.nodes], edges: [...g.edges] }
       for (const sn of suggestedNodes) {
+        // Skip if a node with same label already exists
+        const exists = newGraph.nodes.some((n) => n.label.toLowerCase() === sn.label.toLowerCase())
+        if (exists) continue
+
         const ghostId = `ghost-${crypto.randomUUID()}`
         if (sn.type === "consequence" && sn.parentLabel) {
           const parentOption = newGraph.nodes.find(
@@ -293,8 +299,13 @@ export function DecisionSimulator() {
     }))
   }
 
-  // --- Accept suggested node from sidebar ---
+  // --- Accept suggested node from sidebar (deduplicate) ---
   function handleAcceptNodeFromSidebar(node: { label: string; type: string; parentLabel?: string; risk?: string }) {
+    // Prevent duplicate ghost nodes with the same label
+    const alreadyExists = graph.nodes.some(
+      (n) => n.label.toLowerCase() === node.label.toLowerCase() && (n.isGhost || n.type === node.type)
+    )
+    if (alreadyExists) return
     addGhostNodesToCanvas([node])
   }
 
@@ -344,6 +355,156 @@ export function DecisionSimulator() {
       // silently fail
     } finally {
       setIsAILoading(false)
+    }
+  }
+
+  // --- Edit node label ---
+  function handleEditNode(nodeId: string, newLabel: string) {
+    // Update graph
+    setGraph((g) => ({
+      ...g,
+      nodes: g.nodes.map((n) => (n.id === nodeId ? { ...n, label: newLabel } : n)),
+    }))
+
+    // Update data model
+    const node = graph.nodes.find((n) => n.id === nodeId)
+    if (!node) return
+
+    if (node.type === "center") {
+      setTitle(newLabel)
+    } else if (node.type === "option") {
+      setOptions((prev) =>
+        prev.map((o) => (o.id === nodeId ? { ...o, label: newLabel } : o))
+      )
+    } else if (node.type === "consequence" && node.parentId) {
+      setOptions((prev) =>
+        prev.map((o) =>
+          o.id === node.parentId
+            ? { ...o, consequences: o.consequences.map((c) => (c.id === nodeId ? { ...c, text: newLabel } : c)) }
+            : o
+        )
+      )
+    }
+  }
+
+  // --- Add child node ---
+  function handleAddChildNode(parentNodeId: string) {
+    const parentNode = graph.nodes.find((n) => n.id === parentNodeId)
+    if (!parentNode) return
+
+    const newId = crypto.randomUUID()
+
+    if (parentNode.type === "center") {
+      // Add new option
+      const angle = Math.random() * Math.PI * 2
+      const dist = 200
+      const newOption: DecisionOption = {
+        id: newId,
+        label: "New option",
+        consequences: [],
+      }
+      setOptions((prev) => [...prev, newOption])
+      setGraph((g) => ({
+        ...g,
+        nodes: [
+          ...g.nodes,
+          {
+            id: newId,
+            type: "option" as const,
+            label: "New option",
+            x: parentNode.x + dist * Math.cos(angle),
+            y: parentNode.y + dist * Math.sin(angle),
+          },
+        ],
+        edges: [
+          ...g.edges,
+          { id: `edge-${newId}`, from: "center", to: newId },
+        ],
+      }))
+      // Auto-select and start editing the new node
+      setSelectedNodeId(newId)
+      setSelectedOptionId(newId)
+    } else if (parentNode.type === "option") {
+      // Add new consequence
+      const angle = Math.random() * Math.PI * 0.8 + Math.PI * 0.1
+      const dist = 120
+      const newCons = {
+        id: newId,
+        text: "New consequence",
+        risk: "medium" as const,
+        order: 99,
+      }
+      setOptions((prev) =>
+        prev.map((o) =>
+          o.id === parentNodeId
+            ? { ...o, consequences: [...o.consequences, newCons] }
+            : o
+        )
+      )
+      setGraph((g) => ({
+        ...g,
+        nodes: [
+          ...g.nodes,
+          {
+            id: newId,
+            type: "consequence" as const,
+            label: "New consequence",
+            x: parentNode.x + dist * Math.cos(angle),
+            y: parentNode.y + dist * Math.sin(angle),
+            risk: "medium" as const,
+            parentId: parentNodeId,
+            optionId: parentNodeId,
+          },
+        ],
+        edges: [
+          ...g.edges,
+          { id: `edge-${newId}`, from: parentNodeId, to: newId },
+        ],
+      }))
+      setSelectedNodeId(newId)
+      setSelectedOptionId(parentNodeId)
+    }
+  }
+
+  // --- Delete node ---
+  function handleDeleteNode(nodeId: string) {
+    const node = graph.nodes.find((n) => n.id === nodeId)
+    if (!node || node.type === "center") return
+
+    // Collect all descendant nodes to remove (consequences of an option)
+    const nodesToRemove = new Set<string>([nodeId])
+    if (node.type === "option") {
+      for (const n of graph.nodes) {
+        if (n.parentId === nodeId || n.optionId === nodeId) {
+          nodesToRemove.add(n.id)
+        }
+      }
+    }
+
+    // Remove from graph
+    setGraph((g) => ({
+      ...g,
+      nodes: g.nodes.filter((n) => !nodesToRemove.has(n.id)),
+      edges: g.edges.filter((e) => !nodesToRemove.has(e.from) && !nodesToRemove.has(e.to)),
+    }))
+
+    // Remove from data model
+    if (node.type === "option") {
+      setOptions((prev) => prev.filter((o) => o.id !== nodeId))
+    } else if (node.type === "consequence" && node.parentId) {
+      setOptions((prev) =>
+        prev.map((o) =>
+          o.id === node.parentId
+            ? { ...o, consequences: o.consequences.filter((c) => c.id !== nodeId) }
+            : o
+        )
+      )
+    }
+
+    // Clear selection
+    setSelectedNodeId(null)
+    if (node.type === "option" && selectedOptionId === nodeId) {
+      setSelectedOptionId(null)
     }
   }
 
@@ -610,18 +771,30 @@ export function DecisionSimulator() {
   const ghostCount = graph.nodes.filter((n) => n.isGhost).length
 
   return (
-    <div className="space-y-3">
+    <div className="-mx-4 -my-4 lg:-mx-6 lg:-my-6 flex flex-col h-[calc(100vh-4rem)]">
       {/* Top bar */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-xl font-semibold tracking-tight text-foreground">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between px-4 py-2 lg:px-6 border-b border-border bg-background/80 backdrop-blur-sm shrink-0">
+        <div className="min-w-0">
+          <h1 className="text-lg font-semibold tracking-tight text-foreground truncate">
             {title || "Decision Map"}
           </h1>
-          <p className="text-sm text-muted-foreground">
-            Click nodes to explore &middot; Drag to rearrange &middot; Chat with AI to stress-test
+          <p className="text-xs text-muted-foreground">
+            Click to select &middot; Double-click to edit &middot; Drag to rearrange &middot; Scroll to zoom
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {/* Auto Layout button */}
+          <Button
+            onClick={() => setGraph((g) => forceDirectedLayout(g))}
+            disabled={graph.nodes.length <= 1}
+            variant="outline"
+            size="sm"
+            className="gap-1.5 bg-transparent"
+          >
+            <LayoutGrid className="h-3.5 w-3.5" />
+            Auto Layout
+          </Button>
+
           {/* Magic Expand button */}
           <Button
             onClick={handleMagicExpand}
@@ -710,36 +883,37 @@ export function DecisionSimulator() {
         </Card>
       )}
 
-      {/* Main workspace: Canvas + Socratic Sidebar */}
-      <div className="flex gap-4">
-        <div className="relative flex-1">
-          <GraphCanvas
-            graph={graph}
-            selectedNodeId={selectedNodeId}
-            onSelectNode={handleSelectNode}
-            onNodeDrag={handleNodeDrag}
-            highlightedOptionId={selectedOptionId}
-            onAcceptGhost={handleAcceptGhost}
-            onRejectGhost={handleRejectGhost}
-            className="h-[500px] lg:h-[560px]"
+      {/* Main workspace: full-screen canvas with sidebar pinned right */}
+      <div className="relative flex-1 min-h-0">
+        <GraphCanvas
+          graph={graph}
+          selectedNodeId={selectedNodeId}
+          onSelectNode={handleSelectNode}
+          onNodeDrag={handleNodeDrag}
+          highlightedOptionId={selectedOptionId}
+          onAcceptGhost={handleAcceptGhost}
+          onRejectGhost={handleRejectGhost}
+          onEditNode={handleEditNode}
+          onAddChildNode={handleAddChildNode}
+          onDeleteNode={handleDeleteNode}
+          className="h-full w-full"
+        />
+
+        {/* Commitment overlay on top of graph */}
+        {showCommitment && selectedOptionForCommit && (
+          <CommitmentOverlay
+            commitment={commitment}
+            selectedOptionLabel={selectedOptionForCommit.label}
+            onUpdate={setCommitment}
+            onCommit={handleCommit}
+            onClose={() => setShowCommitment(false)}
+            onAISuggest={handleAICommitmentDraft}
+            isAILoading={isAILoading}
           />
+        )}
 
-          {/* Commitment overlay on top of graph */}
-          {showCommitment && selectedOptionForCommit && (
-            <CommitmentOverlay
-              commitment={commitment}
-              selectedOptionLabel={selectedOptionForCommit.label}
-              onUpdate={setCommitment}
-              onCommit={handleCommit}
-              onClose={() => setShowCommitment(false)}
-              onAISuggest={handleAICommitmentDraft}
-              isAILoading={isAILoading}
-            />
-          )}
-        </div>
-
-        {/* Socratic Sidebar (chat) */}
-        <div className="hidden lg:block">
+        {/* Socratic Sidebar — pinned to right edge */}
+        <div className="hidden lg:block absolute top-0 right-0 h-full z-20">
           <SocraticSidebar
             title={title}
             description={description}
@@ -751,20 +925,20 @@ export function DecisionSimulator() {
             onAcceptNode={handleAcceptNodeFromSidebar}
           />
         </div>
-      </div>
 
-      {/* Mobile sidebar toggle */}
-      <div className="lg:hidden">
-        <MobileSocraticSidebar
-          title={title}
-          description={description}
-          options={options}
-          selectedNodeLabel={selectedNode?.label}
-          onSendMessage={handleSendChatMessage}
-          messages={chatMessages}
-          isLoading={isAILoading}
-          onAcceptNode={handleAcceptNodeFromSidebar}
-        />
+        {/* Mobile sidebar toggle */}
+        <div className="lg:hidden absolute bottom-3 left-3 right-3 z-20">
+          <MobileSocraticSidebar
+            title={title}
+            description={description}
+            options={options}
+            selectedNodeLabel={selectedNode?.label}
+            onSendMessage={handleSendChatMessage}
+            messages={chatMessages}
+            isLoading={isAILoading}
+            onAcceptNode={handleAcceptNodeFromSidebar}
+          />
+        </div>
       </div>
     </div>
   )
