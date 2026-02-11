@@ -4,7 +4,7 @@ import { z } from "zod"
 
 export const maxDuration = 60
 
-const model = google("gemini-2.0-flash")
+const model = google("gemini-2.5-flash-lite")
 
 async function withRetry<T>(fn: () => Promise<T>, retries = 1, delayMs = 15000): Promise<T> {
   for (let i = 0; i <= retries; i++) {
