@@ -6,7 +6,7 @@ export const maxDuration = 60
 
 const model = google("gemini-2.0-flash")
 
-async function withRetry<T>(fn: () => Promise<T>, retries = 2, delayMs = 8000): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, retries = 1, delayMs = 15000): Promise<T> {
   for (let i = 0; i <= retries; i++) {
     try {
       return await fn()
