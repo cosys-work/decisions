@@ -56,5 +56,91 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family: 'Inter', system-ui, sans-serif;
   }
+}
+
+/* Pulsating center node animation */
+@keyframes pulse-ring {
+  0% { transform: scale(1); opacity: 0.6; }
+  50% { transform: scale(1.15); opacity: 0; }
+  100% { transform: scale(1); opacity: 0; }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { filter: drop-shadow(0 0 6px hsl(186 50% 42% / 0.3)); }
+  50% { filter: drop-shadow(0 0 16px hsl(186 50% 42% / 0.6)); }
+}
+
+.node-pulse-ring {
+  animation: pulse-ring 2s ease-out infinite;
+  transform-origin: center;
+}
+
+.node-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* Fog of War - dim unexplored branches */
+.fog-of-war {
+  opacity: 0.25;
+  filter: blur(1.5px);
+  transition: opacity 0.5s ease, filter 0.5s ease;
+}
+
+.fog-of-war:hover {
+  opacity: 0.6;
+  filter: blur(0.5px);
+}
+
+.fog-clear {
+  opacity: 1;
+  filter: blur(0px);
+  transition: opacity 0.5s ease, filter 0.5s ease;
+}
+
+/* Ghost node for AI suggestions */
+@keyframes ghost-float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-4px); }
+}
+
+.ghost-node {
+  animation: ghost-float 3s ease-in-out infinite;
+}
+
+/* Highlighted winning path */
+@keyframes path-glow {
+  0%, 100% { stroke-opacity: 0.8; }
+  50% { stroke-opacity: 1; }
+}
+
+.winning-path {
+  animation: path-glow 2s ease-in-out infinite;
+  filter: drop-shadow(0 0 6px hsl(186 50% 42% / 0.5));
+}
+
+/* Smooth node transitions */
+.graph-node {
+  transition: transform 0.2s ease, opacity 0.4s ease;
+}
+
+/* Sidebar chat scrollbar */
+.chat-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+.chat-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.chat-scroll::-webkit-scrollbar-thumb {
+  background: hsl(34 18% 82%);
+  border-radius: 2px;
+}
+
+/* Canvas full-bleed */
+.canvas-container {
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 50%, hsl(36 33% 97%) 0%, hsl(35 25% 94%) 100%);
 }

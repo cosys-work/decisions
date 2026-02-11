@@ -1,11 +1,10 @@
 import React from "react"
 import type { Metadata } from 'next'
-import { Inter, JetBrains_Mono } from 'next/font/google'
+import { Inter } from 'next/font/google'
 
 import './globals.css'
 
-const _inter = Inter({ subsets: ['latin'] })
-const _jetbrainsMono = JetBrains_Mono({ subsets: ['latin'] })
+const inter = Inter({ subsets: ['latin'], variable: '--font-inter' })
 
 export const metadata: Metadata = {
   title: 'LifeOS - Cognitive Infrastructure for Better Decisions',
@@ -19,7 +18,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className="font-sans antialiased">{children}</body>
+      <body className={`${inter.variable} font-sans antialiased`}>{children}</body>
     </html>
   )
 }

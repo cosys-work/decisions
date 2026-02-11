@@ -7,6 +7,9 @@ export interface GraphNode {
   risk?: "low" | "medium" | "high"
   parentId?: string // for consequence nodes, which option they belong to
   optionId?: string // back-reference to the option
+  weight?: number // 1-5, affects visual size (weighting feature)
+  isGhost?: boolean // AI-suggested node, translucent until accepted
+  explored?: boolean // for fog-of-war: true if user has interacted
 }
 
 export interface GraphEdge {

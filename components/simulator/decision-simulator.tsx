@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Card, CardContent } from "@/components/ui/card"
 import { GraphCanvas } from "./graph-canvas"
-import { AIPanel, type AISuggestion } from "./ai-panel"
+import { SocraticSidebar, type ChatMessage } from "./socratic-sidebar"
 import { CommitmentOverlay } from "./commitment-overlay"
 import type { DecisionSession, DecisionOption, CommitmentCard } from "@/lib/types"
 import type { GraphState } from "@/lib/graph-types"
@@ -16,7 +16,7 @@ import {
   addConsequenceNodes,
 } from "@/lib/graph-types"
 import { addDecision } from "@/lib/store"
-import { Plus, Compass, Check, Sparkles, Loader2, ArrowRight, Vote } from "lucide-react"
+import { Plus, Compass, Check, Sparkles, Loader2, ArrowRight, Vote, Wand2 } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 type SimPhase = "start" | "brain-dump" | "map" | "commit-ready" | "complete"
@@ -34,8 +34,8 @@ export function DecisionSimulator() {
   const [justCompleted, setJustCompleted] = useState(false)
   const [completedSession, setCompletedSession] = useState<DecisionSession | null>(null)
 
-  // AI state
-  const [suggestions, setSuggestions] = useState<AISuggestion[]>([])
+  // Chat / Socratic Sidebar state
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [isAILoading, setIsAILoading] = useState(false)
 
   // Blind vote
@@ -70,20 +70,17 @@ export function DecisionSimulator() {
         )
         setOptions(newOptions)
 
-        // Auto-title from description
         if (!title.trim() && description.length > 10) {
           const autoTitle = description.slice(0, 60).split(".")[0].trim()
           setTitle(autoTitle || "My Decision")
         }
 
-        // Build graph
         const finalTitle = title.trim() || description.slice(0, 60).split(".")[0].trim() || "My Decision"
         let g = createInitialGraph(finalTitle, 450, 300)
         g = layoutOptionsRadially(
           g,
           newOptions.map((o) => ({ id: o.id, label: o.label }))
         )
-        // Add consequence nodes
         for (const opt of newOptions) {
           g = addConsequenceNodes(
             g,
@@ -93,43 +90,216 @@ export function DecisionSimulator() {
         }
         setGraph(g)
 
-        // Add insight as a suggestion
+        // Add AI's initial insight as a chat message
         if (data.insight) {
-          setSuggestions((prev) => [
-            ...prev,
-            {
-              id: crypto.randomUUID(),
-              type: "insight",
-              content: data.insight,
-            },
-          ])
+          setChatMessages([{
+            id: crypto.randomUUID(),
+            role: "ai",
+            content: data.insight,
+            framework: "general",
+            timestamp: new Date(),
+          }])
         }
 
         setPhase("map")
       }
     } catch {
-      // fallback to generic
+      // Fallback: create basic options from description keywords when API fails
+      const finalTitle = title.trim() || description.slice(0, 60).split(".")[0].trim() || "My Decision"
+      setTitle((t) => t || finalTitle)
+      
       const fallbackOptions: DecisionOption[] = [
-        { id: crypto.randomUUID(), label: "Go for it", consequences: [] },
-        { id: crypto.randomUUID(), label: "Stay the course", consequences: [] },
-        { id: crypto.randomUUID(), label: "Find a compromise", consequences: [] },
+        { id: crypto.randomUUID(), label: "Go ahead with it", consequences: [] },
+        { id: crypto.randomUUID(), label: "Stay the current course", consequences: [] },
+        { id: crypto.randomUUID(), label: "Find a middle ground", consequences: [] },
       ]
       setOptions(fallbackOptions)
-      const finalTitle = title.trim() || "My Decision"
+      
       let g = createInitialGraph(finalTitle, 450, 300)
       g = layoutOptionsRadially(
         g,
         fallbackOptions.map((o) => ({ id: o.id, label: o.label }))
       )
       setGraph(g)
+
+      // Inform via chat that AI is unavailable
+      setChatMessages([{
+        id: crypto.randomUUID(),
+        role: "ai",
+        content: "I couldn't connect to the AI service. Please check that your GOOGLE_GENERATIVE_AI_API_KEY is configured in .env.local. You can still use the canvas manually — drag out branches, add consequences, and explore your options.",
+        timestamp: new Date(),
+      }])
+
       setPhase("map")
     } finally {
       setIsAILoading(false)
     }
   }
 
-  // --- Stress-test: get AI to suggest more consequences ---
-  async function handleRequestSuggestions() {
+  // --- Socratic Sidebar: send chat message ---
+  async function handleSendChatMessage(message: string): Promise<ChatMessage | null> {
+    const userMsg: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: message,
+      timestamp: new Date(),
+    }
+    setChatMessages((prev) => [...prev, userMsg])
+    setIsAILoading(true)
+
+    try {
+      const res = await fetch("/api/ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "chat",
+          title,
+          description,
+          message,
+          canvasState: {
+            options: options.map((o) => ({
+              label: o.label,
+              consequences: o.consequences.map((c) => ({ text: c.text, risk: c.risk })),
+            })),
+          },
+        }),
+      })
+      const data = await res.json()
+      if (data?.message) {
+        const aiMsg: ChatMessage = {
+          id: crypto.randomUUID(),
+          role: "ai",
+          content: data.message,
+          framework: data.framework,
+          suggestedNodes: data.suggestedNodes,
+          timestamp: new Date(),
+        }
+        setChatMessages((prev) => [...prev, aiMsg])
+
+        // Auto-add ghost nodes to canvas if suggested
+        if (data.suggestedNodes && data.suggestedNodes.length > 0) {
+          addGhostNodesToCanvas(data.suggestedNodes)
+        }
+
+        return aiMsg
+      }
+    } catch {
+      const errorMsg: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: "ai",
+        content: "I had trouble processing that. Could you rephrase your question?",
+        timestamp: new Date(),
+      }
+      setChatMessages((prev) => [...prev, errorMsg])
+    } finally {
+      setIsAILoading(false)
+    }
+    return null
+  }
+
+  // --- Add ghost nodes to canvas (AI suggestions) ---
+  function addGhostNodesToCanvas(suggestedNodes: { label: string; type: string; parentLabel?: string; risk?: string }[]) {
+    setGraph((g) => {
+      let newGraph = { ...g, nodes: [...g.nodes], edges: [...g.edges] }
+      for (const sn of suggestedNodes) {
+        const ghostId = `ghost-${crypto.randomUUID()}`
+        if (sn.type === "consequence" && sn.parentLabel) {
+          const parentOption = newGraph.nodes.find(
+            (n) => n.type === "option" && n.label.toLowerCase() === sn.parentLabel?.toLowerCase()
+          )
+          if (parentOption) {
+            // Position near the parent option
+            const angle = Math.random() * Math.PI * 0.8 + Math.PI * 0.1
+            const dist = 130
+            newGraph.nodes.push({
+              id: ghostId,
+              type: "consequence",
+              label: sn.label,
+              x: parentOption.x + dist * Math.cos(angle),
+              y: parentOption.y + dist * Math.sin(angle),
+              risk: (sn.risk as "low" | "medium" | "high") || "medium",
+              parentId: parentOption.id,
+              optionId: parentOption.id,
+              isGhost: true,
+            })
+            newGraph.edges.push({
+              id: `edge-ghost-${ghostId}`,
+              from: parentOption.id,
+              to: ghostId,
+            })
+          }
+        } else if (sn.type === "option") {
+          const centerNode = newGraph.nodes.find((n) => n.type === "center")
+          if (centerNode) {
+            const angle = Math.random() * Math.PI * 2
+            const dist = 220
+            newGraph.nodes.push({
+              id: ghostId,
+              type: "option",
+              label: sn.label,
+              x: centerNode.x + dist * Math.cos(angle),
+              y: centerNode.y + dist * Math.sin(angle),
+              isGhost: true,
+            })
+            newGraph.edges.push({
+              id: `edge-ghost-${ghostId}`,
+              from: "center",
+              to: ghostId,
+            })
+          }
+        }
+      }
+      return newGraph
+    })
+  }
+
+  // --- Accept ghost node: convert to real node ---
+  function handleAcceptGhost(nodeId: string) {
+    const ghostNode = graph.nodes.find((n) => n.id === nodeId && n.isGhost)
+    if (!ghostNode) return
+
+    // Convert ghost to real node
+    setGraph((g) => ({
+      ...g,
+      nodes: g.nodes.map((n) =>
+        n.id === nodeId ? { ...n, isGhost: false } : n
+      ),
+    }))
+
+    // Add to options data model if it's a consequence
+    if (ghostNode.type === "consequence" && ghostNode.parentId) {
+      const newCons = {
+        id: nodeId,
+        text: ghostNode.label,
+        risk: ghostNode.risk ?? ("medium" as const),
+        order: 99,
+      }
+      setOptions((prev) =>
+        prev.map((o) =>
+          o.id === ghostNode.parentId
+            ? { ...o, consequences: [...o.consequences, newCons] }
+            : o
+        )
+      )
+    }
+  }
+
+  // --- Reject ghost node: remove from canvas ---
+  function handleRejectGhost(nodeId: string) {
+    setGraph((g) => ({
+      ...g,
+      nodes: g.nodes.filter((n) => n.id !== nodeId),
+      edges: g.edges.filter((e) => e.from !== nodeId && e.to !== nodeId),
+    }))
+  }
+
+  // --- Accept suggested node from sidebar ---
+  function handleAcceptNodeFromSidebar(node: { label: string; type: string; parentLabel?: string; risk?: string }) {
+    addGhostNodesToCanvas([node])
+  }
+
+  // --- Magic Expand: AI auto-suggests consequences for all options ---
+  async function handleMagicExpand() {
     setIsAILoading(true)
     try {
       const res = await fetch("/api/ai", {
@@ -148,65 +318,33 @@ export function DecisionSimulator() {
       })
       const data = await res.json()
       if (data?.suggestions) {
-        const newSuggestions: AISuggestion[] = data.suggestions.map(
-          (s: { optionLabel: string; consequence: string; risk: "low" | "medium" | "high"; reasoning: string }) => ({
-            id: crypto.randomUUID(),
+        const ghostNodes = data.suggestions.map(
+          (s: { optionLabel: string; consequence: string; risk: string }) => ({
+            label: s.consequence,
             type: "consequence" as const,
-            content: s.consequence,
-            detail: s.reasoning,
+            parentLabel: s.optionLabel,
             risk: s.risk,
-            optionLabel: s.optionLabel,
           })
         )
-        setSuggestions((prev) => [...prev, ...newSuggestions])
+        addGhostNodesToCanvas(ghostNodes)
+
+        // Add chat message about the expansion
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            role: "ai",
+            content: `I've added ${ghostNodes.length} suggested consequences as ghost nodes on your canvas. Review each one and accept or dismiss it.`,
+            framework: "general",
+            timestamp: new Date(),
+          },
+        ])
       }
     } catch {
       // silently fail
     } finally {
       setIsAILoading(false)
     }
-  }
-
-  // --- Accept AI suggestion: add as consequence to the matching option ---
-  function handleAcceptSuggestion(suggestion: AISuggestion) {
-    setSuggestions((prev) =>
-      prev.map((s) => (s.id === suggestion.id ? { ...s, accepted: true } : s))
-    )
-
-    if (suggestion.type === "consequence" && suggestion.optionLabel) {
-      const matchingOption = options.find(
-        (o) => o.label.toLowerCase() === suggestion.optionLabel?.toLowerCase()
-      )
-      if (matchingOption) {
-        const newCons = {
-          id: crypto.randomUUID(),
-          text: suggestion.content,
-          risk: suggestion.risk ?? ("medium" as const),
-          order: matchingOption.consequences.length + 1,
-        }
-        const updatedOptions = options.map((o) =>
-          o.id === matchingOption.id
-            ? { ...o, consequences: [...o.consequences, newCons] }
-            : o
-        )
-        setOptions(updatedOptions)
-
-        // Update graph
-        setGraph((g) =>
-          addConsequenceNodes(
-            g,
-            matchingOption.id,
-            updatedOptions
-              .find((o) => o.id === matchingOption.id)!
-              .consequences.map((c) => ({ id: c.id, text: c.text, risk: c.risk }))
-          )
-        )
-      }
-    }
-  }
-
-  function handleRejectSuggestion(id: string) {
-    setSuggestions((prev) => prev.map((s) => (s.id === id ? { ...s, rejected: true } : s)))
   }
 
   // --- Node drag ---
@@ -217,7 +355,7 @@ export function DecisionSimulator() {
     }))
   }, [])
 
-  // --- Select node: determine which option is highlighted ---
+  // --- Select node ---
   function handleSelectNode(id: string | null) {
     setSelectedNodeId(id)
     if (!id) return
@@ -285,31 +423,53 @@ export function DecisionSimulator() {
     setPhase("complete")
   }
 
+  // --- Reset ---
+  function handleReset() {
+    setPhase("start")
+    setTitle("")
+    setDescription("")
+    setOptions([])
+    setGraph(createInitialGraph("", 900, 600))
+    setSelectedNodeId(null)
+    setSelectedOptionId(null)
+    setCommitment(null)
+    setShowCommitment(false)
+    setJustCompleted(false)
+    setCompletedSession(null)
+    setChatMessages([])
+    setBlindVoteResult(null)
+    setShowBlindVote(false)
+  }
+
   // ===== START SCREEN =====
   if (phase === "start") {
     return (
       <div className="flex flex-col items-center justify-center py-16">
-        <div className="mx-auto max-w-lg space-y-6 text-center">
-          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-accent/10">
-            <Compass className="h-8 w-8 text-accent" />
+        <div className="mx-auto max-w-lg space-y-8 text-center">
+          <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-2xl bg-gradient-to-br from-accent/20 to-accent/5">
+            <Compass className="h-10 w-10 text-accent" />
           </div>
-          <div className="space-y-2">
-            <h1 className="text-balance text-3xl font-semibold tracking-tight text-foreground">
-              Decision Simulator
+          <div className="space-y-3">
+            <h1 className="text-balance text-4xl font-semibold tracking-tight text-foreground">
+              Cognitive Canvas
             </h1>
-            <p className="text-base leading-relaxed text-muted-foreground">
-              A graph-based workspace to map your decision, stress-test each option with AI,
-              and commit with confidence.
+            <p className="text-base leading-relaxed text-muted-foreground max-w-md mx-auto">
+              From confusion to clarity in 15 minutes. Map your decision, stress-test it with AI, and commit with confidence.
             </p>
           </div>
-          <Button
-            onClick={() => setPhase("brain-dump")}
-            className="gap-2 bg-accent text-accent-foreground hover:bg-accent/90"
-            size="lg"
-          >
-            <Plus className="h-4 w-4" />
-            Start New Decision
-          </Button>
+          <div className="space-y-3">
+            <Button
+              onClick={() => setPhase("brain-dump")}
+              className="gap-2 bg-accent text-accent-foreground hover:bg-accent/90 h-12 px-8 text-base"
+              size="lg"
+            >
+              <Plus className="h-5 w-5" />
+              Start a Decision
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              Brain dump your thoughts. AI will structure them into a visual decision map.
+            </p>
+          </div>
         </div>
       </div>
     )
@@ -320,28 +480,42 @@ export function DecisionSimulator() {
     return (
       <div className="mx-auto max-w-2xl space-y-6">
         <div className="space-y-2">
-          <h2 className="text-2xl font-semibold tracking-tight text-foreground">Brain Dump</h2>
-          <p className="text-sm leading-relaxed text-muted-foreground">
-            Describe the decision weighing on your mind. Be messy -- the AI will help you
-            structure it into a visual map.
+          <div className="flex items-center gap-2">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent/10">
+              <span className="text-sm font-bold text-accent">1</span>
+            </div>
+            <h2 className="text-2xl font-semibold tracking-tight text-foreground">Brain Dump</h2>
+          </div>
+          <p className="text-sm leading-relaxed text-muted-foreground pl-10">
+            Describe the decision weighing on your mind. Be messy — the AI will help you structure it into a visual map.
           </p>
         </div>
 
         <Card className="border-border bg-card">
           <CardContent className="space-y-4 pt-6">
-            <Input
-              placeholder="Give your decision a short title..."
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              className="text-base font-medium"
-            />
-            <Textarea
-              placeholder="Describe your situation in detail. What's the context? What are you feeling? What's at stake? Don't filter yourself..."
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              rows={6}
-              className="resize-none text-sm leading-relaxed"
-            />
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                What is the decision?
+              </label>
+              <Input
+                placeholder="e.g., Should I change careers to data science?"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                className="text-base font-medium"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                Tell me everything
+              </label>
+              <Textarea
+                placeholder="Describe your situation in detail. What's the context? What are you feeling? What's at stake? Don't filter yourself..."
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                rows={6}
+                className="resize-none text-sm leading-relaxed"
+              />
+            </div>
           </CardContent>
         </Card>
 
@@ -378,8 +552,7 @@ export function DecisionSimulator() {
               Decision Committed
             </h2>
             <p className="text-sm leading-relaxed text-muted-foreground">
-              Your decision has been saved. Revisit it in Decision History to reflect
-              on how things unfold.
+              Your decision has been saved. Revisit it in Decision History to reflect on how things unfold.
             </p>
           </div>
 
@@ -399,7 +572,7 @@ export function DecisionSimulator() {
                 </div>
                 <div>
                   <span className="text-xs font-medium uppercase tracking-wider text-success">
-                    WHY
+                    Because
                   </span>
                   <p className="text-sm font-medium text-foreground">
                     {completedSession.commitment.reason}
@@ -407,7 +580,7 @@ export function DecisionSimulator() {
                 </div>
                 <div>
                   <span className="text-xs font-medium uppercase tracking-wider text-destructive">
-                    TRADE-OFF
+                    I accept this trade-off
                   </span>
                   <p className="text-sm font-medium text-foreground">
                     {completedSession.commitment.tradeoff}
@@ -419,22 +592,7 @@ export function DecisionSimulator() {
 
           <div className="flex justify-center">
             <Button
-              onClick={() => {
-                setPhase("start")
-                setTitle("")
-                setDescription("")
-                setOptions([])
-                setGraph(createInitialGraph("", 900, 600))
-                setSelectedNodeId(null)
-                setSelectedOptionId(null)
-                setCommitment(null)
-                setShowCommitment(false)
-                setJustCompleted(false)
-                setCompletedSession(null)
-                setSuggestions([])
-                setBlindVoteResult(null)
-                setShowBlindVote(false)
-              }}
+              onClick={handleReset}
               variant="outline"
               className="gap-2 bg-transparent"
             >
@@ -447,11 +605,12 @@ export function DecisionSimulator() {
     )
   }
 
-  // ===== GRAPH MAP VIEW (main workspace) =====
+  // ===== COGNITIVE CANVAS (main workspace) =====
   const selectedOptionForCommit = options.find((o) => o.id === selectedOptionId)
+  const ghostCount = graph.nodes.filter((n) => n.isGhost).length
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {/* Top bar */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
@@ -459,10 +618,27 @@ export function DecisionSimulator() {
             {title || "Decision Map"}
           </h1>
           <p className="text-sm text-muted-foreground">
-            Click nodes to explore. Drag to rearrange. Use AI to stress-test.
+            Click nodes to explore &middot; Drag to rearrange &middot; Chat with AI to stress-test
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {/* Magic Expand button */}
+          <Button
+            onClick={handleMagicExpand}
+            disabled={isAILoading || options.length === 0}
+            variant="outline"
+            size="sm"
+            className="gap-1.5 border-purple-200 text-purple-600 hover:bg-purple-50 bg-transparent"
+          >
+            <Wand2 className="h-3.5 w-3.5" />
+            Magic Expand
+            {ghostCount > 0 && (
+              <span className="flex h-4 w-4 items-center justify-center rounded-full bg-purple-500 text-[9px] font-semibold text-white">
+                {ghostCount}
+              </span>
+            )}
+          </Button>
+
           {selectedOptionId && !blindVoteResult && (
             <Button
               onClick={() => setShowBlindVote(true)}
@@ -534,7 +710,7 @@ export function DecisionSimulator() {
         </Card>
       )}
 
-      {/* Main workspace: graph + AI panel */}
+      {/* Main workspace: Canvas + Socratic Sidebar */}
       <div className="flex gap-4">
         <div className="relative flex-1">
           <GraphCanvas
@@ -543,6 +719,8 @@ export function DecisionSimulator() {
             onSelectNode={handleSelectNode}
             onNodeDrag={handleNodeDrag}
             highlightedOptionId={selectedOptionId}
+            onAcceptGhost={handleAcceptGhost}
+            onRejectGhost={handleRejectGhost}
             className="h-[500px] lg:h-[560px]"
           />
 
@@ -560,64 +738,69 @@ export function DecisionSimulator() {
           )}
         </div>
 
-        {/* AI Side Panel */}
+        {/* Socratic Sidebar (chat) */}
         <div className="hidden lg:block">
-          <AIPanel
-            suggestions={suggestions}
-            isLoading={isAILoading}
+          <SocraticSidebar
+            title={title}
+            description={description}
+            options={options}
             selectedNodeLabel={selectedNode?.label}
-            onAccept={handleAcceptSuggestion}
-            onReject={handleRejectSuggestion}
-            onRequestSuggestions={handleRequestSuggestions}
+            onSendMessage={handleSendChatMessage}
+            messages={chatMessages}
+            isLoading={isAILoading}
+            onAcceptNode={handleAcceptNodeFromSidebar}
           />
         </div>
       </div>
 
-      {/* Mobile AI button */}
+      {/* Mobile sidebar toggle */}
       <div className="lg:hidden">
-        <MobileAIPanel
-          suggestions={suggestions}
-          isLoading={isAILoading}
+        <MobileSocraticSidebar
+          title={title}
+          description={description}
+          options={options}
           selectedNodeLabel={selectedNode?.label}
-          onAccept={handleAcceptSuggestion}
-          onReject={handleRejectSuggestion}
-          onRequestSuggestions={handleRequestSuggestions}
+          onSendMessage={handleSendChatMessage}
+          messages={chatMessages}
+          isLoading={isAILoading}
+          onAcceptNode={handleAcceptNodeFromSidebar}
         />
       </div>
     </div>
   )
 }
 
-// Mobile-friendly AI panel that expands from bottom
-function MobileAIPanel(props: {
-  suggestions: AISuggestion[]
-  isLoading: boolean
+// Mobile-friendly Socratic Sidebar toggle
+function MobileSocraticSidebar(props: {
+  title: string
+  description: string
+  options: DecisionOption[]
   selectedNodeLabel?: string
-  onAccept: (s: AISuggestion) => void
-  onReject: (id: string) => void
-  onRequestSuggestions: () => void
+  onSendMessage: (message: string) => Promise<ChatMessage | null>
+  messages: ChatMessage[]
+  isLoading: boolean
+  onAcceptNode?: (node: { label: string; type: string; parentLabel?: string; risk?: string }) => void
 }) {
   const [expanded, setExpanded] = useState(false)
-  const activeSuggestions = props.suggestions.filter((s) => !s.accepted && !s.rejected)
 
   return (
     <div>
       <Button
         onClick={() => setExpanded(!expanded)}
         variant="outline"
-        className="w-full gap-2 bg-transparent"
+        className="w-full gap-2 bg-transparent border-purple-200 text-purple-600 hover:bg-purple-50"
       >
         <Sparkles className="h-4 w-4" />
-        AI Coach
-        {activeSuggestions.length > 0 && (
-          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-accent text-[10px] font-semibold text-accent-foreground">
-            {activeSuggestions.length}
+        Socratic Guide
+        {props.messages.filter(m => m.role === "ai").length > 0 && (
+          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-purple-500 text-[10px] font-semibold text-white">
+            {props.messages.filter(m => m.role === "ai").length}
           </span>
         )}
       </Button>
       {expanded && (
         <div className="mt-2">
-          <AIPanel {...props} className="w-full" />
+          <SocraticSidebar {...props} className="w-full" />
         </div>
       )}
     </div>

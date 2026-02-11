@@ -23,9 +23,9 @@ interface AppShellProps {
 }
 
 const navItems: { id: ActiveView; label: string; icon: React.ElementType; description: string }[] = [
-  { id: "simulator", label: "Decision Simulator", icon: Compass, description: "Explore trade-offs" },
-  { id: "history", label: "Decision History", icon: History, description: "Past decisions" },
-  { id: "gym", label: "Cognitive Gym", icon: Dumbbell, description: "Daily exercises" },
+  { id: "simulator", label: "Cognitive Canvas", icon: Compass, description: "15-min clarity sprint" },
+  { id: "history", label: "Life Map", icon: History, description: "Past decisions & reflections" },
+  { id: "gym", label: "Cognitive Gym", icon: Dumbbell, description: "Sharpen your reasoning" },
 ]
 
 export function AppShell({ activeView, onViewChange, children }: AppShellProps) {
@@ -104,7 +104,7 @@ export function AppShell({ activeView, onViewChange, children }: AppShellProps) 
       </header>
 
       <main className="flex-1">
-        <div className="mx-auto max-w-7xl px-4 py-6 lg:px-8 lg:py-8">
+        <div className="mx-auto max-w-[1440px] px-4 py-4 lg:px-6 lg:py-6">
           {children}
         </div>
       </main>

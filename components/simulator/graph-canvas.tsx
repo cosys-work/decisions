@@ -12,39 +12,75 @@ interface GraphCanvasProps {
   onSelectNode: (id: string | null) => void
   onNodeDrag?: (id: string, x: number, y: number) => void
   highlightedOptionId?: string | null
+  winningOptionId?: string | null
+  onAcceptGhost?: (nodeId: string) => void
+  onRejectGhost?: (nodeId: string) => void
   className?: string
+}
+
+// Color palette from spec
+const COLORS = {
+  bg: "hsl(36 33% 97%)",
+  bgDark: "hsl(37 30% 95%)",
+  charcoal: "hsl(30 10% 15%)",
+  border: "hsl(34 18% 88%)",
+  borderLight: "hsl(34 18% 82%)",
+  accent: "hsl(186 50% 42%)",
+  accentLight: "hsl(186 50% 42% / 0.15)",
+  accentGlow: "hsl(186 50% 42% / 0.3)",
+  green: "hsl(152 45% 45%)",
+  greenLight: "hsl(152 45% 45% / 0.12)",
+  orange: "hsl(36 80% 60%)",
+  orangeLight: "hsl(36 80% 60% / 0.12)",
+  red: "hsl(12 80% 55%)",
+  redLight: "hsl(12 80% 55% / 0.12)",
+  purple: "hsl(270 50% 55%)",
+  purpleLight: "hsl(270 50% 55% / 0.12)",
+  purpleBorder: "hsl(270 50% 55% / 0.5)",
 }
 
 function getRiskColor(risk?: "low" | "medium" | "high") {
   switch (risk) {
     case "low":
-      return { fill: "hsl(152 45% 45% / 0.12)", stroke: "hsl(152 45% 45%)", text: "hsl(152 45% 45%)" }
+      return { fill: COLORS.greenLight, stroke: COLORS.green, text: COLORS.green }
     case "medium":
-      return { fill: "hsl(36 80% 60% / 0.12)", stroke: "hsl(36 80% 60%)", text: "hsl(30 10% 15%)" }
+      return { fill: COLORS.orangeLight, stroke: COLORS.orange, text: COLORS.charcoal }
     case "high":
-      return { fill: "hsl(12 80% 55% / 0.12)", stroke: "hsl(12 80% 55%)", text: "hsl(12 80% 55%)" }
+      return { fill: COLORS.redLight, stroke: COLORS.red, text: COLORS.red }
     default:
-      return { fill: "hsl(186 50% 42% / 0.08)", stroke: "hsl(186 50% 42%)", text: "hsl(30 10% 15%)" }
+      return { fill: COLORS.accentLight, stroke: COLORS.accent, text: COLORS.charcoal }
   }
 }
 
-function getNodeColors(node: GraphNode, isSelected: boolean, isHighlighted: boolean) {
+function getNodeColors(node: GraphNode, isSelected: boolean, isHighlighted: boolean, isWinning: boolean) {
+  if (node.isGhost) {
+    return {
+      fill: COLORS.purpleLight,
+      stroke: COLORS.purpleBorder,
+      text: COLORS.purple,
+      strokeWidth: 1.5,
+      dashArray: "6 3",
+    }
+  }
+
   if (node.type === "center") {
     return {
-      fill: isSelected ? "hsl(186 50% 42% / 0.15)" : "hsl(37 30% 95%)",
-      stroke: "hsl(186 50% 42%)",
-      text: "hsl(30 10% 15%)",
+      fill: isSelected ? COLORS.accentLight : COLORS.bgDark,
+      stroke: COLORS.accent,
+      text: COLORS.charcoal,
       strokeWidth: isSelected ? 3 : 2.5,
+      dashArray: "none",
     }
   }
 
   if (node.type === "option") {
-    const base = getRiskColor()
+    const active = isSelected || isHighlighted || isWinning
     return {
-      fill: isSelected || isHighlighted ? "hsl(186 50% 42% / 0.15)" : "hsl(37 30% 95%)",
-      stroke: isSelected || isHighlighted ? "hsl(186 50% 42%)" : "hsl(34 18% 82%)",
-      text: "hsl(30 10% 15%)",
-      strokeWidth: isSelected || isHighlighted ? 2.5 : 1.5,
+      fill: active ? COLORS.accentLight : COLORS.bgDark,
+      stroke: active ? COLORS.accent : COLORS.borderLight,
+      text: COLORS.charcoal,
+      strokeWidth: active ? 2.5 : 1.5,
+      dashArray: "none",
     }
   }
 
@@ -55,6 +91,7 @@ function getNodeColors(node: GraphNode, isSelected: boolean, isHighlighted: bool
     stroke: colors.stroke,
     text: colors.text,
     strokeWidth: isSelected ? 2.5 : 1.5,
+    dashArray: "none",
   }
 }
 
@@ -64,9 +101,9 @@ function bezierPath(x1: number, y1: number, x2: number, y2: number): string {
   const dx = x2 - x1
   const dy = y2 - y1
   const dist = Math.sqrt(dx * dx + dy * dy)
+  if (dist === 0) return `M ${x1} ${y1} L ${x2} ${y2}`
   const curvature = Math.min(dist * 0.2, 40)
 
-  // perpendicular offset for curve
   const nx = -dy / dist * curvature
   const ny = dx / dist * curvature
 
@@ -90,7 +127,7 @@ function wrapText(text: string, maxChars: number): string[] {
     }
   }
   if (current) lines.push(current.trim())
-  return lines.slice(0, 3) // max 3 lines
+  return lines.slice(0, 3)
 }
 
 export function GraphCanvas({
@@ -99,6 +136,9 @@ export function GraphCanvas({
   onSelectNode,
   onNodeDrag,
   highlightedOptionId,
+  winningOptionId,
+  onAcceptGhost,
+  onRejectGhost,
   className,
 }: GraphCanvasProps) {
   const svgRef = useRef<SVGSVGElement>(null)
@@ -106,13 +146,12 @@ export function GraphCanvas({
   const [viewBox, setViewBox] = useState({ x: 0, y: 0, w: 900, h: 600 })
   const [panning, setPanning] = useState<{ startX: number; startY: number; startVBX: number; startVBY: number } | null>(null)
 
-  // compute viewbox to fit all nodes
   useEffect(() => {
     if (graph.nodes.length <= 1) {
       setViewBox({ x: 0, y: 0, w: 900, h: 600 })
       return
     }
-    const padding = 160
+    const padding = 180
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
     for (const node of graph.nodes) {
       minX = Math.min(minX, node.x)
@@ -147,11 +186,12 @@ export function GraphCanvas({
   const handleMouseDown = useCallback(
     (e: React.MouseEvent, nodeId: string) => {
       e.stopPropagation()
+      const node = graph.nodes.find((n) => n.id === nodeId)
+      if (node?.isGhost) return // ghost nodes can't be dragged
       if (!onNodeDrag) {
         onSelectNode(nodeId)
         return
       }
-      const node = graph.nodes.find((n) => n.id === nodeId)
       if (!node) return
       const pt = getSVGPoint(e)
       setDragging({ nodeId, offsetX: pt.x - node.x, offsetY: pt.y - node.y })
@@ -207,8 +247,17 @@ export function GraphCanvas({
 
   const nodeMap = new Map(graph.nodes.map((n) => [n.id, n]))
 
+  // Determine which option groups are "explored" (have consequences or are selected)
+  const exploredOptionIds = new Set<string>()
+  if (highlightedOptionId) exploredOptionIds.add(highlightedOptionId)
+  for (const node of graph.nodes) {
+    if (node.type === "consequence" && node.parentId) {
+      exploredOptionIds.add(node.parentId)
+    }
+  }
+
   return (
-    <div className={cn("relative overflow-hidden rounded-xl border border-border bg-card", className)}>
+    <div className={cn("canvas-container relative overflow-hidden rounded-xl border border-border", className)}>
       <svg
         ref={svgRef}
         viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`}
@@ -222,10 +271,16 @@ export function GraphCanvas({
             <path
               d="M 40 0 L 0 0 0 40"
               fill="none"
-              stroke="hsl(34 18% 88% / 0.5)"
+              stroke={`${COLORS.border}80`}
               strokeWidth="0.5"
             />
           </pattern>
+          <filter id="ghost-blur">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="0.8" />
+          </filter>
+          <filter id="fog-blur">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="1.2" />
+          </filter>
         </defs>
         <rect
           x={viewBox.x - 500}
@@ -242,6 +297,10 @@ export function GraphCanvas({
           if (!from || !to) return null
 
           const toNode = to
+          const isGhostEdge = from.isGhost || to.isGhost
+          const belongsToOption = to.parentId || (to.type === "option" ? to.id : from.type === "option" ? from.id : null)
+          const isFogged = belongsToOption && highlightedOptionId && belongsToOption !== highlightedOptionId
+          const isWinningEdge = winningOptionId && (to.id === winningOptionId || to.parentId === winningOptionId || from.id === winningOptionId)
           const isHighlighted =
             highlightedOptionId &&
             (to.id === highlightedOptionId ||
@@ -249,14 +308,16 @@ export function GraphCanvas({
               to.parentId === highlightedOptionId ||
               from.parentId === highlightedOptionId)
 
-          let strokeColor = "hsl(34 18% 82%)"
-          if (toNode.type === "consequence") {
-            if (toNode.risk === "high") strokeColor = "hsl(12 80% 55% / 0.4)"
-            else if (toNode.risk === "medium") strokeColor = "hsl(36 80% 60% / 0.4)"
-            else strokeColor = "hsl(152 45% 45% / 0.4)"
+          let strokeColor = COLORS.borderLight
+          if (isGhostEdge) {
+            strokeColor = COLORS.purpleBorder
+          } else if (toNode.type === "consequence") {
+            if (toNode.risk === "high") strokeColor = `${COLORS.red}66`
+            else if (toNode.risk === "medium") strokeColor = `${COLORS.orange}66`
+            else strokeColor = `${COLORS.green}66`
           }
-          if (isHighlighted) {
-            strokeColor = "hsl(186 50% 42%)"
+          if (isHighlighted && !isGhostEdge) {
+            strokeColor = COLORS.accent
           }
 
           return (
@@ -265,36 +326,71 @@ export function GraphCanvas({
               d={bezierPath(from.x, from.y, to.x, to.y)}
               fill="none"
               stroke={strokeColor}
-              strokeWidth={isHighlighted ? 2 : 1.5}
-              strokeDasharray={toNode.type === "consequence" ? "6 3" : "none"}
-              className="transition-all duration-200"
+              strokeWidth={isWinningEdge ? 3 : isHighlighted ? 2 : 1.5}
+              strokeDasharray={isGhostEdge ? "4 4" : toNode.type === "consequence" ? "6 3" : "none"}
+              opacity={isFogged ? 0.2 : isGhostEdge ? 0.6 : 1}
+              className={cn(
+                "transition-all duration-300",
+                isWinningEdge && "winning-path"
+              )}
             />
           )
         })}
 
+        {/* Pulsating ring behind center node */}
+        {graph.nodes.filter(n => n.type === "center").map((node) => (
+          <ellipse
+            key={`pulse-${node.id}`}
+            cx={node.x}
+            cy={node.y}
+            rx={74}
+            ry={46}
+            fill="none"
+            stroke={COLORS.accent}
+            strokeWidth="2"
+            className="node-pulse-ring"
+          />
+        ))}
+
         {/* Nodes */}
         {graph.nodes.map((node) => {
           const isSelected = selectedNodeId === node.id
+          const isWinning = winningOptionId === node.id || node.parentId === winningOptionId
           const isHighlighted =
             highlightedOptionId !== undefined &&
             highlightedOptionId !== null &&
             (node.id === highlightedOptionId || node.parentId === highlightedOptionId)
 
-          const colors = getNodeColors(node, isSelected, isHighlighted)
+          // Fog of War: dim option groups that are not currently focused
+          const belongsToOption = node.parentId || (node.type === "option" ? node.id : null)
+          const isFogged = node.type !== "center" && belongsToOption && highlightedOptionId && belongsToOption !== highlightedOptionId
+
+          const colors = getNodeColors(node, isSelected, isHighlighted, isWinning)
           const isCenter = node.type === "center"
           const isCons = node.type === "consequence"
+          const isGhost = node.isGhost
 
-          const rx = isCenter ? 70 : isCons ? 55 : 62
-          const ry = isCenter ? 42 : isCons ? 22 : 28
+          // Weighting: scale node size based on weight (1-5)
+          const weightScale = node.weight ? 0.8 + (node.weight / 5) * 0.6 : 1
+          const baseRx = isCenter ? 72 : isCons ? 55 : 64
+          const baseRy = isCenter ? 44 : isCons ? 24 : 30
+          const rx = baseRx * weightScale
+          const ry = baseRy * weightScale
 
           const lines = wrapText(node.label, isCenter ? 18 : isCons ? 16 : 14)
-          const fontSize = isCenter ? 13 : isCons ? 10.5 : 11.5
+          const fontSize = isCenter ? 13.5 : isCons ? 10.5 : 11.5
 
           return (
             <g
               key={node.id}
               onMouseDown={(e) => handleMouseDown(e, node.id)}
-              className="cursor-pointer"
+              className={cn(
+                "cursor-pointer graph-node",
+                isCenter && "node-pulse-glow",
+                isGhost && "ghost-node"
+              )}
+              opacity={isFogged ? 0.25 : isGhost ? 0.7 : 1}
+              filter={isFogged ? "url(#fog-blur)" : undefined}
               role="button"
               tabIndex={0}
               aria-label={node.label}
@@ -307,6 +403,7 @@ export function GraphCanvas({
                 fill={colors.fill}
                 stroke={colors.stroke}
                 strokeWidth={colors.strokeWidth}
+                strokeDasharray={colors.dashArray}
                 className="transition-all duration-200"
               />
               {lines.map((line, i) => (
@@ -319,25 +416,89 @@ export function GraphCanvas({
                   fill={colors.text}
                   fontSize={fontSize}
                   fontWeight={isCenter ? 600 : isCons ? 400 : 500}
-                  fontFamily="var(--font-inter), system-ui, sans-serif"
+                  fontFamily="Inter, system-ui, sans-serif"
                   className="pointer-events-none select-none"
                 >
                   {line}
                 </text>
               ))}
               {/* Risk indicator dot for consequences */}
-              {isCons && node.risk && (
+              {isCons && node.risk && !isGhost && (
                 <circle
                   cx={node.x + rx - 8}
                   cy={node.y - ry + 8}
                   r={4}
                   fill={
                     node.risk === "high"
-                      ? "hsl(12 80% 55%)"
+                      ? COLORS.red
                       : node.risk === "medium"
-                        ? "hsl(36 80% 60%)"
-                        : "hsl(152 45% 45%)"
+                        ? COLORS.orange
+                        : COLORS.green
                   }
+                />
+              )}
+              {/* Ghost node accept/reject buttons */}
+              {isGhost && onAcceptGhost && onRejectGhost && (
+                <g>
+                  {/* Accept button */}
+                  <g
+                    onClick={(e) => { e.stopPropagation(); onAcceptGhost(node.id) }}
+                    className="cursor-pointer"
+                  >
+                    <circle
+                      cx={node.x + rx + 12}
+                      cy={node.y - 8}
+                      r={10}
+                      fill={COLORS.green}
+                      opacity={0.9}
+                    />
+                    <text
+                      x={node.x + rx + 12}
+                      y={node.y - 7}
+                      textAnchor="middle"
+                      dominantBaseline="central"
+                      fill="white"
+                      fontSize="11"
+                      fontWeight="bold"
+                      className="pointer-events-none"
+                    >
+                      ✓
+                    </text>
+                  </g>
+                  {/* Reject button */}
+                  <g
+                    onClick={(e) => { e.stopPropagation(); onRejectGhost(node.id) }}
+                    className="cursor-pointer"
+                  >
+                    <circle
+                      cx={node.x + rx + 12}
+                      cy={node.y + 12}
+                      r={10}
+                      fill={COLORS.red}
+                      opacity={0.9}
+                    />
+                    <text
+                      x={node.x + rx + 12}
+                      y={node.y + 13}
+                      textAnchor="middle"
+                      dominantBaseline="central"
+                      fill="white"
+                      fontSize="11"
+                      fontWeight="bold"
+                      className="pointer-events-none"
+                    >
+                      ✕
+                    </text>
+                  </g>
+                </g>
+              )}
+              {/* AI suggestion indicator (purple dot) */}
+              {isGhost && (
+                <circle
+                  cx={node.x - rx + 8}
+                  cy={node.y - ry + 8}
+                  r={5}
+                  fill={COLORS.purple}
                 />
               )}
             </g>
